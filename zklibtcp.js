@@ -334,6 +334,103 @@ class ZKLibTCP {
     })
   }
 
+  /**
+   *
+   * @param {*} reqData - indicate the type of data that need to receive ( user or attLog)
+   * @param {*} cb - callback is triggered when receiving packets
+   *
+   * readWithBuffer will reject error if it'wrong when starting request data
+   * readWithBuffer will return { data: replyData , err: Error } when receiving requested data
+   */
+  readWithBufferNew(reqData, cb = null) {
+    return new Promise(async (resolve, reject) => {
+      this.replyId++;
+      const buf = createTCPHeader(COMMANDS.CMD_DATA_WRRQ, this.sessionId, this.replyId, reqData)
+      let reply = null;
+      try {
+        reply = await this.requestData(buf)
+        // console.log('FIRST REPLY HEX:', reply.toString('hex').slice(0, 128))
+      } catch (err) {
+        return reject(err)
+      }
+      const header = decodeTCPHeader(reply.subarray(0, 16))
+      switch (header.commandId) {
+          // Casos “pequeños”, todo vino en un solo paquete
+        case COMMANDS.CMD_DATA: {
+          // quitamos cabecera TCP (8) + cabecera interna (8)
+          return resolve({ data: reply.subarray(16), mode: 8 })
+        }
+          // Casos grandes, hay que ir pidiendo chunks
+        case COMMANDS.CMD_ACK_OK:
+        case COMMANDS.CMD_PREPARE_DATA: {
+          const recvData = reply.subarray(16)
+          const size = recvData.readUIntLE(1, 4)
+          // tamaño total que el dispositivo dice que hay
+          let replyData = Buffer.from([])
+          let totalBuffer = Buffer.from([])
+          const timeout = 10000
+          let timer = null
+          const resetTimer = () => {
+            if (timer) clearTimeout(timer)
+            timer = setTimeout(() => {
+              internalCallback(replyData, new Error('TIMEOUT WHEN RECEIVING PACKET'))
+            }, timeout)
+          }
+          const internalCallback = (data, err = null) => {
+            if (timer) clearTimeout(timer)
+            resolve({ data, err })
+          }
+          const handleOnData = (chunk) => {
+            // descartar eventos de tiempo real
+            if (checkNotEventTCP(chunk)) return;
+            resetTimer()
+            // acumulamos lo que va llegando por TCP
+            totalBuffer = Buffer.concat([totalBuffer, chunk])
+            // procesar tantos paquetes completos como haya en el buffer
+            while (totalBuffer.length >= 8) {
+              const packetLength = totalBuffer.readUInt16LE(4)
+              // longitud del payload (incluye cabecera interna de 8 bytes)
+              if (totalBuffer.length < 8 + packetLength) {
+                // todavía no llegó todo el paquete
+                break
+              } // estructura: [8 bytes cabecera TCP][packetLength bytes payload] // payload: [8 bytes cabecera interna][datos]
+              const payload = totalBuffer.subarray(8, 8 + packetLength)
+              if (payload.length > 8) {
+                const dataPart = payload.subarray(8)
+                // quitamos cabecera interna
+                replyData = Buffer.concat([replyData, dataPart])
+                cb && cb(replyData.length, size)
+              }
+              // avanzar al siguiente paquete (si hay)
+              totalBuffer = totalBuffer.subarray(8 + packetLength)
+            }
+            // si ya juntamos todo lo que el dispositivo dijo que había, cerramos
+            if (replyData.length >= size) {
+              internalCallback(replyData)
+            }
+          }
+          this.socket.once('close', () => {
+            internalCallback(replyData, new Error('Socket is disconnected unexpectedly'))
+          })
+          this.socket.on('data', handleOnData)
+          resetTimer()
+          // Pedimos los chunks como hace la lib original
+          let remain = size % MAX_CHUNK
+          let numberChunks = Math.round(size - remain) / MAX_CHUNK
+          for (let i = 0; i <= numberChunks; i++) {
+            if (i === numberChunks) {
+              this.sendChunkRequest(numberChunks * MAX_CHUNK, remain)
+            } else {
+              this.sendChunkRequest(i * MAX_CHUNK, MAX_CHUNK)
+            }
+          }
+          break
+        } default: {
+          return reject(new Error('ERROR_IN_UNHANDLE_CMD ' + exportErrorMessage(header.commandId)))
+        }
+      }
+    })
+  }
 
   async getSmallAttendanceLogs(){
 
@@ -343,7 +440,7 @@ class ZKLibTCP {
    *  reject error when starting request data
    *  return { data: users, err: Error } when receiving requested data
    */
-  async getUsers() {
+  async getUsers(old=true) {
     // Free Buffer Data to request Data
     if (this.socket) {
       try {
@@ -355,7 +452,12 @@ class ZKLibTCP {
 
     let data = null
     try {
-      data = await this.readWithBuffer(REQUEST_DATA.GET_USERS)
+      if (old){
+        data = await this.readWithBuffer(REQUEST_DATA.GET_USERS)
+      }else{
+        data = await this.readWithBufferNew(REQUEST_DATA.GET_USERS)
+      }
+
  
     } catch (err) {
       return Promise.reject(err)
@@ -372,8 +474,8 @@ class ZKLibTCP {
 
 
     const USER_PACKET_SIZE = 72
-
-    let userData = data.data.subarray(4)
+    const sub = old ? 4 : 12
+    let userData = data.data.subarray(sub)
 
     let users = []
 
