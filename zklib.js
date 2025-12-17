@@ -1,293 +1,192 @@
 const ZKLibTCP = require('./zklibtcp')
-const ZKLibUDP = require('./zklibudp')
+// Py-only TCP protocol stack (1:1 port from fananimi/pyzk)
+const { ZKPyTcp } = require('./zklibtcpPy')
 
-const { ZKError , ERROR_TYPES } = require('./zkerror')
+const { ZKError } = require('./zkerror')
 
 class ZKLib {
-    constructor(ip, port, timeout , inport){
+    /**
+     * @param {string} ip
+     * @param {number} port
+     * @param {number} timeout
+     * @param {number} inport - unused in PY-only mode (kept for signature compatibility)
+     * @param {object} [options]
+     * @param {number} [options.password=0]
+     * @param {boolean} [options.verbose=false]
+     */
+    constructor(ip, port, timeout, inport, options = {}) {
         this.connectionType = null
 
-        this.zklibTcp = new ZKLibTCP(ip,port,timeout) 
-        this.zklibUdp = new ZKLibUDP(ip,port,timeout , inport) 
-        this.interval = null 
+        // We reuse the legacy TCP class ONLY to create/hold the net.Socket.
+        // We do NOT use legacy protocol methods (executeCmd/getUsers/etc.) in PY-only mode.
+        this.zklibTcp = new ZKLibTCP(ip, port, timeout)
+
+        this.zklibTcpPy = null
+
+        this.interval = null
         this.timer = null
         this.isBusy = false
+
         this.ip = ip
+        this.port = port
+        this.timeout = timeout
+
+        this.password = options.password ?? 0
+        this.verbose = options.verbose ?? false
+
+        // kept for backwards compatibility; unused in PY-only mode
+        this.inport = inport
     }
 
-    async functionWrapper (tcpCallback, udpCallback , command ){
-        switch(this.connectionType){
-            case 'tcp':
-                if(this.zklibTcp.socket){
-                    try{
-                        const res =  await tcpCallback()
-                        return res
-                    }catch(err){
-                        return Promise.reject(new ZKError(
-                            err,
-                            `[TCP] ${command}`,
-                            this.ip
-                        ))
-                    }
-                       
-                }else{
-                    return Promise.reject(new ZKError(
-                        new Error( `Socket isn't connected !`),
-                        `[TCP]`,
-                        this.ip
-                    ))
-                }
-            case 'udp':
-                if(this.zklibUdp.socket){
-                    try{
-                        const res =  await udpCallback()
-                        return res
-                    }catch(err){
-                        return Promise.reject(new ZKError(
-                            err,
-                            `[UDP] ${command}`,
-                            this.ip
-                        ))
-                    }    
-                }else{
-                    return Promise.reject(new ZKError(
-                        new Error( `Socket isn't connected !`),
-                        `[UDP]`,
-                        this.ip
-                    ))
-                }
-            default:
-                return Promise.reject(new ZKError(
-                    new Error( `Socket isn't connected !`),
-                    '',
-                    this.ip
-                ))
+    /**
+     * Wrapper retained for consistent error formatting.
+     * In PY-only mode we only execute the TCP callback.
+     */
+    async functionWrapper(tcpCallback, _udpCallback, command = '') {
+        if (!this.zklibTcp?.socket) {
+            return Promise.reject(new ZKError(
+                new Error(`Socket isn't connected !`),
+                `[PY][TCP] ${command}`,
+                this.ip
+            ))
+        }
+
+        try {
+            return await tcpCallback()
+        } catch (err) {
+            return Promise.reject(new ZKError(
+                err,
+                `[PY][TCP] ${command}`,
+                this.ip
+            ))
         }
     }
 
-    async createSocket(cbErr, cbClose){
-        try{
-            if(!this.zklibTcp.socket){
-                try{
-                    await this.zklibTcp.createSocket(cbErr,cbClose)
-                   
+    /**
+     * PY-only: create TCP socket and connect using the pyzk-compatible protocol stack.
+     * NOTE: No UDP fallback in this mode.
+     */
+    async createSocket(cbErr, cbClose) {
+        try {
+            if (!this.zklibTcp.socket) {
+                await this.zklibTcp.createSocket(cbErr, cbClose)
+            }
+            console.log("socket creado")
+            // (Re)create the PY stack if missing or if socket changed
+            if (!this.zklibTcpPy || this.zklibTcpPy.__sock !== this.zklibTcp.socket) {
+                this.zklibTcpPy = new ZKPyTcp({
+                    ip: this.ip,
+                    port: this.port,
+                    timeout: this.timeout,
+                    password: this.password,
+                    verbose: this.verbose,
+                    encoding: 'UTF-8',
+                })
+                this.zklibTcpPy.attachSocket(this.zklibTcp.socket)
+            }
 
-                }catch(err){
-                    throw err;
-                }
-              
-                try{
-                    await this.zklibTcp.connect();
-                    console.log('ok tcp')
-                }catch(err){
-                    throw err;
-                }
-            }      
-
+            await this.zklibTcpPy.connect()
+            await this.zklibTcpPy.read_sizes()
             this.connectionType = 'tcp'
+            return true
+        } catch (err) {
+            this.connectionType = null
+            // best-effort cleanup
+            try { await this.zklibTcpPy?.disconnect() } catch (_) { }
+            try { await this.zklibTcp?.disconnect() } catch (_) { }
+            this.zklibTcpPy = null
 
-        }catch(err){
-            try{
-                await this.zklibTcp.disconnect()
-            }catch(err){}
-
-            if(err.code !== ERROR_TYPES.ECONNREFUSED){
-                return Promise.reject(new ZKError(err, 'TCP CONNECT' , this.ip))
-            }
-
-            try {
-                if(!this.zklibUdp.socket){
-                    await this.zklibUdp.createSocket(cbErr, cbClose)
-                    await this.zklibUdp.connect()
-                }   
-                
-                console.log('ok udp')
-                this.connectionType = 'udp'
-            }catch(err){
-
-
-
-                if(err.code !== 'EADDRINUSE'){
-                    this.connectionType = null
-                    try{
-                        await this.zklibUdp.disconnect()
-                        this.zklibUdp.socket = null
-                        this.zklibTcp.socket = null
-                    }catch(err){}
-
-
-                    return Promise.reject(new ZKError(err, 'UDP CONNECT' , this.ip))
-                }else{
-                    this.connectionType = 'udp'
-                    
-                }
-                
-            }
+            return Promise.reject(new ZKError(err, 'PY TCP CONNECT', this.ip))
         }
     }
 
-    async getUsers(old = true){
+    async disconnect() {
+        try {
+            if (this.zklibTcpPy) {
+                await this.zklibTcpPy.disconnect()
+            }
+        } finally {
+            try { await this.zklibTcp?.disconnect() } catch (_) { }
+            this.zklibTcpPy = null
+            this.connectionType = null
+        }
+        return true
+    }
+
+    // =========================
+    // PY-implemented methods
+    // =========================
+
+    async getUsers() {
         return await this.functionWrapper(
-            ()=> this.zklibTcp.getUsers(old),
-            ()=> this.zklibUdp.getUsers()
+            () => this.zklibTcpPy.get_users(),
+            null,
+            'GET_USERS'
         )
     }
 
-    async getTime(){
+    /**
+     * PY-only: set user (delegates to pyzk-compatible set_user)
+     * Firma compatible con la lib legacy (uid, userId, name, password, role, cardno)
+     */
+    async setUser(uid, userId, name, password = '', role = 0, cardno = 0, group_id = '') {
         return await this.functionWrapper(
-            ()=> this.zklibTcp.getTime(),
-            ()=> this.zklibUdp.getTime()
-        )
-    }
-    async getSerialNumber(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getSerialNumber()
+            () => this.zklibTcpPy.set_user(uid, name, role, password, group_id, userId, cardno),
+            null,
+            'SET_USER'
         )
     }
 
-    async getDeviceVersion(){
+    async testVoice(index = 0) {
         return await this.functionWrapper(
-            ()=> this.zklibTcp.getDeviceVersion()
-        )
-    }
-    async getDeviceName(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getDeviceName()
-        )
-    }
-    async getPlatform(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getPlatform()
-        )
-    }
-    async getOS(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getOS()
-        )
-    }
-    async getWorkCode(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getWorkCode()
-        )
-    }
-    async getPIN(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getPIN()
-        )
-    }
-    async getFaceOn(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getFaceOn()
-        )
-    }
-    async getSSR(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getSSR()
-        )
-    }
-    async getFirmware(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getFirmware()
-        )
-    }
-    async setUser(uid, userid, name, password, role = 0, cardno = 0){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.setUser(uid, userid, name, password, role, cardno)
-        )
+            () => this.zklibTcpPy.test_voice(index),
+            null,
+            'TEST_VOICE'
+        );
     }
 
-    async getAttendanceSize(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getAttendanceSize()
-        )
+    // =========================
+    // Not yet migrated methods
+    // =========================
+
+    _notImplemented(method) {
+        return Promise.reject(new ZKError(
+            new Error(`Not implemented in PY-only mode: ${method}`),
+            `[PY_MODE] ${method}`,
+            this.ip
+        ))
     }
 
-    async getAttendances(cb){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getAttendances(cb),
-            ()=> this.zklibUdp.getAttendances(cb),
-        )
-    }
+    async getTime() { return this._notImplemented('getTime') }
+    async getSerialNumber() { return this._notImplemented('getSerialNumber') }
+    async getDeviceName() { return this._notImplemented('getDeviceName') }
+    async getPlatform() { return this._notImplemented('getPlatform') }
+    async getOs() { return this._notImplemented('getOs') }
+    async getWorkCode() { return this._notImplemented('getWorkCode') }
+    async getFaceOn() { return this._notImplemented('getFaceOn') }
+    async getSSR() { return this._notImplemented('getSSR') }
+    async getFingerprintOn() { return this._notImplemented('getFingerprintOn') }
+    async getUserTemplate() { return this._notImplemented('getUserTemplate') }
+    async setUserTemplate() { return this._notImplemented('setUserTemplate') }
+    async getAttendances() { return this._notImplemented('getAttendances') }
+    async clearAttendanceLog() { return this._notImplemented('clearAttendanceLog') }
+    async getInfo() { return this._notImplemented('getInfo') }
+    async getRealTimeLogs() { return this._notImplemented('getRealTimeLogs') }
+    async setRealTimeLogs() { return this._notImplemented('setRealTimeLogs') }
+    async disableDevice() { return this._notImplemented('disableDevice') }
+    async enableDevice() { return this._notImplemented('enableDevice') }
+    async disconnectWithReboot() { return this._notImplemented('disconnectWithReboot') }
+    async restart() { return this._notImplemented('restart') }
+    async setTime() { return this._notImplemented('setTime') }
+    async deleteUser() { return this._notImplemented('deleteUser') }
+    async clearUsers() { return this._notImplemented('clearUsers') }
+    async getConnectedIP() { return this._notImplemented('getConnectedIP') }
 
-    async getRealTimeLogs(cb){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getRealTimeLogs(cb),
-            ()=> this.zklibUdp.getRealTimeLogs(cb)
-        )
-    }
-
-    async disconnect(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.disconnect(),
-            ()=> this.zklibUdp.disconnect()
-        )
-    }
-
-    async freeData(){
-        return await this. functionWrapper(
-            ()=> this.zklibTcp.freeData(),
-            ()=> this.zklibUdp.freeData()
-        )
-    }
-
-
-    async disableDevice(){
-        return await this. functionWrapper(
-            ()=>this.zklibTcp.disableDevice(),
-            ()=>this.zklibUdp.disableDevice()
-        )
-    }
-
-
-    async enableDevice(){
-        return await this.functionWrapper(
-            ()=>this.zklibTcp.enableDevice(),
-            ()=> this.zklibUdp.enableDevice()
-        )
-    }
-
-
-    async getInfo(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.getInfo(),
-            ()=>this.zklibUdp.getInfo()
-        )
-    }
-
-
-    async getSocketStatus(){
-        return await this.functionWrapper(
-            ()=>this.zklibTcp.getSocketStatus(),
-            ()=> this.zklibUdp.getSocketStatus()
-        )
-    }
-
-    async clearAttendanceLog(){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.clearAttendanceLog(),
-            ()=> this.zklibUdp.clearAttendanceLog()
-        )
-    }
-
-    async executeCmd(command, data=''){
-        return await this.functionWrapper(
-            ()=> this.zklibTcp.executeCmd(command, data),
-            ()=> this.zklibUdp.executeCmd(command , data)
-        )
-    }
-
-    setIntervalSchedule(cb , timer){
-        this.interval = setInterval(cb, timer)
-    }
-
-
-    setTimerSchedule(cb, timer){
-        this.timer = setTimeout(cb,timer)
-    }
-
-    
-
+    // Scheduling helpers preserved
+    clearIntervalSchedule() { this.interval && clearInterval(this.interval) }
+    clearTimerSchedule() { this.timer && clearTimeout(this.timer) }
+    setIntervalSchedule(cb, timer) { this.interval = setInterval(cb, timer) }
+    setTimerSchedule(cb, timer) { this.timer = setTimeout(cb, timer) }
 }
-
 
 module.exports = ZKLib
