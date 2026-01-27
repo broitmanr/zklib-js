@@ -49,6 +49,16 @@ const Const = {
     USER_ADMIN: 14,
     CMD_TESTVOICE: 1017,
 
+    CMD_ATTLOG_RRQ:13,
+    CMD_CLEAR_ATTLOG: 15,
+
+    CMD_ENABLEDEVICE: 1002,
+    CMD_DISABLEDEVICE: 1003,
+    CMD_GET_DEVINFO: 11
+
+
+
+
 };
 
 /**
@@ -90,6 +100,22 @@ class UserPy {
         };
     }
 }
+
+
+class AttendancePy {
+    constructor(user_id, timestamp, status, punch = 0, uid = 0) {
+        this.uid = uid;         // en pyzk “not really used any more”, pero lo conserva
+        this.user_id = user_id; // string
+        this.timestamp = timestamp; // Date
+        this.status = status;   // number
+        this.punch = punch;     // number
+    }
+
+    toString() {
+        return `<Attendance>: ${this.user_id} : ${this.timestamp} (${this.status}, ${this.punch})`;
+    }
+}
+
 
 /**
  * Utilidades de packing/unpacking little-endian (equivalentes a struct.pack/unpack)
@@ -360,6 +386,25 @@ class ZKPyTcp {
         return await this.read_sizes();
     }
 
+    async disable_device() {
+        const cmd_response = await this.__send_command(
+            Const.CMD_DISABLEDEVICE,
+            Buffer.alloc(0),
+            8
+        );
+        return !!cmd_response.status;
+    }
+
+    async enable_device() {
+        const cmd_response = await this.__send_command(
+            Const.CMD_ENABLEDEVICE,
+            Buffer.alloc(0),
+            8
+        );
+        return !!cmd_response.status;
+    }
+
+
     /**
      * Asocia un socket TCP ya conectado.
      * IMPORTANTE: este socket debe estar en modo "exclusive usage" para este handler.
@@ -578,6 +623,22 @@ class ZKPyTcp {
         return 0;
     }
 
+    __decode_time(buf4) {
+        // pyzk: t = unpack("<I", t)[0]
+        let t = buf4.readUInt32LE(0);
+
+        const second = t % 60; t = Math.floor(t / 60);
+        const minute = t % 60; t = Math.floor(t / 60);
+        const hour   = t % 24; t = Math.floor(t / 24);
+        const day    = (t % 31) + 1; t = Math.floor(t / 31);
+        const month  = (t % 12) + 1; t = Math.floor(t / 12);
+        const year   = t + 2000;
+
+        const date = new Date(year, month - 1, day, hour, minute, second);
+        return date
+    }
+
+
     /**
      * __recieve_raw_data (pyzk)
      * :contentReference[oaicite:12]{index=12}
@@ -650,7 +711,7 @@ class ZKPyTcp {
         if (this.__response === Const.CMD_PREPARE_DATA) {
             const data = [];
             const size = this.__get_data_size();
-            
+
             // TCP logic: si len(self.__data) >= (8+size) data_recv = self.__data[8:] else recv(size+32)
             // :contentReference[oaicite:16]{index=16}
             let data_recv;
@@ -659,7 +720,7 @@ class ZKPyTcp {
             } else {
                 // self.__data[8:] + self.__sock.recv(size + 32)
                 const rest = this.__data.subarray(8);
-                
+
 
                 // Queremos completar hasta tener (8 + size) bytes dentro de self.__data (payload ZK).
                 const target = 8 + size;
@@ -714,11 +775,11 @@ class ZKPyTcp {
             const command_string = Buffer.concat([pack_i32_le(start), pack_i32_le(size)]);
 
             const response_size = size + 32; // TCP
-            
+
             const cmd_response = await this.__send_command(command, command_string, response_size);
-            
+
             const data = await this.__recieve_chunk();
-            
+
             if (data != null) return data;
         }
         throw new ZKErrorResponse(`can't read chunk ${start}:[${size}]`);
@@ -755,7 +816,6 @@ class ZKPyTcp {
         let start = 0;
 
         const cmd_response = await this.__send_command(Const._CMD_PREPARE_BUFFER, command_string, response_size);
-    
         if (!cmd_response.status) throw new ZKErrorResponse('RWB Not supported');
 
         // Si code == CMD_DATA, retorna self.__data (+ raw si falta)
@@ -769,7 +829,7 @@ class ZKPyTcp {
             }
             return { data: this.__data, size: this.__data.length };
         }
-        
+
 
         // size = unpack('I', self.__data[1:5])[0]
         const size = unpack_u32_le(this.__data.subarray(1, 5), 0);
@@ -781,15 +841,15 @@ class ZKPyTcp {
             data.push(await this.__read_chunk(start, MAX_CHUNK));
             start += MAX_CHUNK;
         }
-        
+
         if (remain) {
-            
+
             const chunk =await this.__read_chunk(start, remain)
-            
+
             data.push(chunk);
             start += remain;
         }
-      
+
         await this.free_data();
         return { data: Buffer.concat(data), size: start };
     }
@@ -799,24 +859,48 @@ class ZKPyTcp {
      * :contentReference[oaicite:21]{index=21}
      */
     async read_sizes() {
-        
+        const command = Const.CMD_GET_FREE_SIZES;
         const response_size = 1024;
-        const cmd_response = await this.__send_command(Const.CMD_GET_FREE_SIZES, Buffer.alloc(0), response_size);
+
+        const cmd_response = await this.__send_command(command, Buffer.alloc(0), response_size);
         if (!cmd_response.status) throw new ZKErrorResponse("can't read sizes");
 
-        // En Python: si len(__data) >= 80 => unpack('20i', __data[:80]); users=fields[4]
+        // pyzk: if len(__data) >= 80: fields = unpack('20i', __data[:80])
         if (this.__data.length >= 80) {
-            // 20 * int32
             const fields = [];
             for (let i = 0; i < 20; i++) {
                 fields.push(unpack_i32_le(this.__data, i * 4));
             }
+
             this.users = fields[4];
-            // pyzk sigue con otros campos (fingers, records, etc). Aquí no es necesario para get_users.
+            this.fingers = fields[6];
+            this.records = fields[8];
+            this.dummy = fields[10];
+            this.cards = fields[12];
+            this.fingers_cap = fields[14];
+            this.users_cap = fields[15];
+            this.rec_cap = fields[16];
+            this.fingers_av = fields[17];
+            this.users_av = fields[18];
+            this.rec_av = fields[19];
+
             this.__data = this.__data.subarray(80);
         }
+
+        // pyzk: if len(__data) >= 12: fields = unpack('3i', __data[:12])
+        if (this.__data.length >= 12) {
+            const faceFields = [];
+            for (let i = 0; i < 3; i++) {
+                faceFields.push(unpack_i32_le(this.__data, i * 4));
+            }
+            this.faces = faceFields[0];
+            this.faces_cap = faceFields[2];
+            // Nota: pyzk NO recorta __data acá; lo dejamos igual (1:1)
+        }
+
         return true;
     }
+
 
     /**
      * get_users (pyzk) — 1:1
@@ -1069,7 +1153,104 @@ class ZKPyTcp {
         return !!cmd_response.status;
     }
 
+    async get_attendance() {
+        // pyzk: self.read_sizes(); if self.records == 0: return []
+        await this.read_sizes();
+        if (!this.records || this.records === 0) return [];
 
+        // pyzk: users = self.get_users()
+        const users = await this.get_users();
+
+        // pyzk: attendance_data, size = self.read_with_buffer(const.CMD_ATTLOG_RRQ)
+        const { data: attendance_data, size } = await this.read_with_buffer(Const.CMD_ATTLOG_RRQ);
+        // pyzk: if size < 4: return []
+        if (!attendance_data || size < 4 || attendance_data.length < 4) return [];
+
+        // pyzk: total_size = unpack("I", attendance_data[:4])[0]
+        const total_size = attendance_data.readUInt32LE(0);
+
+        // pyzk: record_size = total_size/self.records
+        const record_size = total_size / this.records;
+        // pyzk: attendance_data = attendance_data[4:]
+        let data = attendance_data.subarray(4);
+
+        const attendances = [];
+
+        if (record_size === 8) {
+            // pyzk: unpack('HB4sB', ...)
+            while (data.length >= 8) {
+                const uid = data.readUInt16LE(0);
+                const status = data.readUInt8(2);
+                const tsBuf = data.subarray(3, 7); // 4 bytes
+                const punch = data.readUInt8(7);
+
+                // pyzk: tuser = list(filter(lambda x: x.uid == uid, users))
+                const tuser = users.filter(u => u.uid === uid);
+
+                let user_id;
+                let uid_out;
+
+                if (!tuser.length) {
+                    user_id = String(uid);
+                    uid_out = String(uid);
+                } else {
+                    user_id = tuser[0].user_id;
+                    uid_out = tuser[0].uid;
+                }
+
+                const timestamp = this.__decode_time(tsBuf);
+                attendances.push(new AttendancePy(user_id, timestamp, status, punch, uid_out));
+
+                data = data.subarray(8);
+            }
+        } else {
+            // pyzk: else => registros de 40 bytes: unpack('<H24sB4sB8s', ...)
+            while (data.length >= 40) {
+                const uid = data.readUInt16LE(0);
+                const userIdRaw = data.subarray(2, 26); // 24s
+                const status = data.readUInt8(26);      // B
+                const tsBuf = data.subarray(27, 31);    // 4s
+                const punch = data.readUInt8(31);       // B
+                // 8s padding: data.subarray(32, 40) se ignora
+
+                // pyzk: user_id = (user_id.split(b'\x00')[0]).decode(errors='ignore')
+                const user_id = userIdRaw.toString(this.encoding || 'utf8').split('\0')[0];
+
+                const timestamp = this.__decode_time(tsBuf);
+                attendances.push(new AttendancePy(user_id, timestamp, status, punch, uid));
+
+                data = data.subarray(40);
+            }
+        }
+        return attendances;
+    }
+
+
+    async clear_attendance(){
+        const command = Const.CMD_CLEAR_ATTLOG
+
+        const cmd_response = await this.__send_command(command,Buffer.alloc(0),8)
+
+        if (cmd_response.status){
+
+            await this.refresh_data();
+
+            console.log("cant de records", this.records)
+            return true;
+        }
+
+        return false
+    }
+
+    async get_info() {
+        await this.read_sizes()
+
+        return {
+            "userCounts": this.users || 0,
+            "logCounts": this.records || 0,
+            "logCapacity": this.rec_cap || 0,
+        }
+    }
 
 
     /**

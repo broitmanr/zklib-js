@@ -145,6 +145,48 @@ class ZKLib {
         );
     }
 
+    async getAttendanceLog() {
+        return await this.functionWrapper(
+            () => this.zklibTcpPy.get_attendance(),
+            () => null,
+            '[PY][TCP] GET_ATTENDANCE'
+        );
+    }
+
+    async clearAttendance() {
+        return await this.functionWrapper(
+            () => this.zklibTcpPy.clear_attendance(),
+            () => null,
+            '[PY][TCP] CLEAR_ATTENDANCE'
+        );
+    }
+
+    async disableDevice() {
+        return await this.functionWrapper(
+            () => this.zklibTcpPy.disable_device(),
+            null,
+            'DISABLE_DEVICE'
+        );
+    }
+
+    async enableDevice() {
+        return await this.functionWrapper(
+            () => this.zklibTcpPy.enable_device(),
+            null,
+            'ENABLE_DEVICE'
+        );
+    }
+
+    async getInfo() {
+        return await this.functionWrapper(
+            () => this.zklibTcpPy.get_info(),
+            null,
+            '[PY][TCP] GET_INFO'
+        );
+    }
+
+
+
     // =========================
     // Not yet migrated methods
     // =========================
@@ -168,13 +210,13 @@ class ZKLib {
     async getFingerprintOn() { return this._notImplemented('getFingerprintOn') }
     async getUserTemplate() { return this._notImplemented('getUserTemplate') }
     async setUserTemplate() { return this._notImplemented('setUserTemplate') }
-    async getAttendances() { return this._notImplemented('getAttendances') }
-    async clearAttendanceLog() { return this._notImplemented('clearAttendanceLog') }
-    async getInfo() { return this._notImplemented('getInfo') }
+    // async getAttendances() { return this._notImplemented('getAttendances') }
+    // async clearAttendanceLog() { return this._notImplemented('clearAttendanceLog') }
+    // async getInfo() { return this._notImplemented('getInfo') }
     async getRealTimeLogs() { return this._notImplemented('getRealTimeLogs') }
     async setRealTimeLogs() { return this._notImplemented('setRealTimeLogs') }
-    async disableDevice() { return this._notImplemented('disableDevice') }
-    async enableDevice() { return this._notImplemented('enableDevice') }
+    // async disableDevice() { return this._notImplemented('disableDevice') }
+    // async enableDevice() { return this._notImplemented('enableDevice') }
     async disconnectWithReboot() { return this._notImplemented('disconnectWithReboot') }
     async restart() { return this._notImplemented('restart') }
     async setTime() { return this._notImplemented('setTime') }
