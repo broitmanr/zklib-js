@@ -49,6 +49,10 @@ test()
 - `getInfo()`: Get general device information
 - `getUsers()`: Retrieve users from the device
 - `setUser(uid, userid, name, password, role = 0, cardno = 0)`: Create a new user
+- `getUserTemplate(uid = '', tempId = 0, userId = '')`: Retrieve one fingerprint template
+- `getTemplates()`: Retrieve all fingerprint templates
+- `saveUserTemplate(userOrUid, fingers = [])`: Save a user with one or more fingerprint templates
+- `setUserTemplate(userOrUid, fingers = [])`: Alias for `saveUserTemplate`
 - `getAttendances(callback)`: Get all attendance logs
 - `getRealTimeLogs(callback)`: Get real-time logs
 - `getTime()`: Get current time from the device
@@ -65,6 +69,26 @@ test()
 - `getAttendanceSize()`: Get attendance log size
 - `clearAttendanceLog()`: Clear attendance logs
 - `disconnect()`: Disconnect from the device
+
+### Fingerprint Templates
+
+Fingerprint templates are returned as JSON-serializable objects. The `template` field is a hex string so it can be stored or sent through JSON safely.
+
+```javascript
+const users = await zkInstance.getUsers()
+const user = users[0]
+
+// Read one finger. tempId is the finger index, usually 0-9.
+const finger = await zkInstance.getUserTemplate(user.uid, 0)
+console.log(finger)
+
+// Read all stored fingerprint templates.
+const fingers = await zkInstance.getTemplates()
+console.log(fingers)
+
+// Restore/save a user with one or more existing templates.
+await zkInstance.saveUserTemplate(user, [finger])
+```
 
 ### Custom Commands
 

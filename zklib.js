@@ -31,8 +31,8 @@ class ZKLib {
         this.port = port
         this.timeout = timeout
 
-        this.password = options.password ?? 0
-        this.verbose = options.verbose ?? false
+        this.password = options.password !== undefined ? options.password : 0
+        this.verbose = options.verbose !== undefined ? options.verbose : false
 
         // kept for backwards compatibility; unused in PY-only mode
         this.inport = inport
@@ -43,7 +43,7 @@ class ZKLib {
      * In PY-only mode we only execute the TCP callback.
      */
     async functionWrapper(tcpCallback, _udpCallback, command = '') {
-        if (!this.zklibTcp?.socket) {
+        if (!this.zklibTcp || !this.zklibTcp.socket) {
             return Promise.reject(new ZKError(
                 new Error(`Socket isn't connected !`),
                 `[PY][TCP] ${command}`,
@@ -92,8 +92,8 @@ class ZKLib {
         } catch (err) {
             this.connectionType = null
             // best-effort cleanup
-            try { await this.zklibTcpPy?.disconnect() } catch (_) { }
-            try { await this.zklibTcp?.disconnect() } catch (_) { }
+            try { if (this.zklibTcpPy) await this.zklibTcpPy.disconnect() } catch (_) { }
+            try { if (this.zklibTcp) await this.zklibTcp.disconnect() } catch (_) { }
             this.zklibTcpPy = null
 
             return Promise.reject(new ZKError(err, 'PY TCP CONNECT', this.ip))
@@ -106,7 +106,7 @@ class ZKLib {
                 await this.zklibTcpPy.disconnect()
             }
         } finally {
-            try { await this.zklibTcp?.disconnect() } catch (_) { }
+            try { if (this.zklibTcp) await this.zklibTcp.disconnect() } catch (_) { }
             this.zklibTcpPy = null
             this.connectionType = null
         }
@@ -185,6 +185,42 @@ class ZKLib {
         );
     }
 
+    async getUserTemplate(uid = '', tempId = 0, userId = '') {
+        return await this.functionWrapper(
+            () => this.zklibTcpPy.get_user_template(uid, tempId, userId),
+            null,
+            'GET_USER_TEMPLATE'
+        )
+    }
+
+    async getTemplates() {
+        return await this.functionWrapper(
+            () => this.zklibTcpPy.get_templates(),
+            null,
+            'GET_TEMPLATES'
+        )
+    }
+
+    async saveUserTemplate(userOrUid, fingers = []) {
+        return await this.functionWrapper(
+            () => this.zklibTcpPy.save_user_template(userOrUid, fingers),
+            null,
+            'SAVE_USER_TEMPLATE'
+        )
+    }
+
+    async setUserTemplate(userOrUid, fingers = []) {
+        return await this.saveUserTemplate(userOrUid, fingers)
+    }
+
+    async deleteUser(uid = 0, userId = '') {
+        return await this.functionWrapper(
+            () => this.zklibTcpPy.delete_user(uid, userId),
+            null,
+            'DELETE_USER'
+        )
+    }
+
 
 
     // =========================
@@ -208,8 +244,6 @@ class ZKLib {
     async getFaceOn() { return this._notImplemented('getFaceOn') }
     async getSSR() { return this._notImplemented('getSSR') }
     async getFingerprintOn() { return this._notImplemented('getFingerprintOn') }
-    async getUserTemplate() { return this._notImplemented('getUserTemplate') }
-    async setUserTemplate() { return this._notImplemented('setUserTemplate') }
     // async getAttendances() { return this._notImplemented('getAttendances') }
     // async clearAttendanceLog() { return this._notImplemented('clearAttendanceLog') }
     // async getInfo() { return this._notImplemented('getInfo') }
@@ -220,7 +254,6 @@ class ZKLib {
     async disconnectWithReboot() { return this._notImplemented('disconnectWithReboot') }
     async restart() { return this._notImplemented('restart') }
     async setTime() { return this._notImplemented('setTime') }
-    async deleteUser() { return this._notImplemented('deleteUser') }
     async clearUsers() { return this._notImplemented('clearUsers') }
     async getConnectedIP() { return this._notImplemented('getConnectedIP') }
 

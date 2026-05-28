@@ -22,8 +22,11 @@ const Const = {
     MACHINE_PREPARE_DATA_2: 32130, // 0x7282
 
     CMD_DB_RRQ: 7,
+    CMD_DELETE_USER: 18,
     CMD_USERTEMP_RRQ: 9,
     CMD_GET_FREE_SIZES: 50,
+    _CMD_GET_USERTEMP: 88,
+    _CMD_SAVE_USERTEMPS: 110,
 
     CMD_CONNECT: 1000,
     CMD_EXIT: 1001,
@@ -42,6 +45,7 @@ const Const = {
     CMD_ACK_UNKNOWN: 0xffff,
 
     // FCT
+    FCT_FINGERTMP: 2,
     FCT_USER: 5,
 
     CMD_USER_WRQ: 8,
@@ -99,6 +103,120 @@ class UserPy {
             card: this.card,
         };
     }
+
+    static fromJSON(json) {
+        if (json instanceof UserPy) return json;
+        if (!json || typeof json !== 'object') {
+            throw new ZKErrorResponse('Invalid user');
+        }
+        return new UserPy(
+            json.uid,
+            json.name,
+            json.privilege,
+            json.password,
+            json.group_id,
+            json.user_id,
+            json.card
+        );
+    }
+
+    repack29() {
+        const enc = UserPy.encoding;
+        const pass5 = fixedStringBuffer(this.password, 5, enc);
+        const name8 = fixedStringBuffer(this.name, 8, enc);
+
+        const b = Buffer.alloc(29, 0);
+        let o = 0;
+        b.writeUInt8(2, o); o += 1;
+        b.writeUInt16LE(parseInt(this.uid, 10) & 0xffff, o); o += 2;
+        b.writeUInt8(parseInt(this.privilege, 10) & 0xff, o); o += 1;
+        pass5.copy(b, o); o += 5;
+        name8.copy(b, o); o += 8;
+        b.writeUInt32LE(parseInt(this.card, 10) >>> 0, o); o += 4;
+        o += 1;
+        b.writeUInt8(parseInt(this.group_id || 0, 10) & 0xff, o); o += 1;
+        b.writeInt16LE(0, o); o += 2;
+        b.writeUInt32LE(parseInt(this.user_id, 10) >>> 0, o);
+        return b;
+    }
+
+    repack73() {
+        const enc = UserPy.encoding;
+        const pass8 = fixedStringBuffer(this.password, 8, enc);
+        const name24 = fixedStringBuffer(this.name, 24, enc);
+        const group7 = fixedStringBuffer(this.group_id || '', 7, enc);
+        const userId24 = fixedStringBuffer(this.user_id, 24, enc);
+
+        const b = Buffer.alloc(73, 0);
+        let o = 0;
+        b.writeUInt8(2, o); o += 1;
+        b.writeUInt16LE(parseInt(this.uid, 10) & 0xffff, o); o += 2;
+        b.writeUInt8(parseInt(this.privilege, 10) & 0xff, o); o += 1;
+        pass8.copy(b, o); o += 8;
+        name24.copy(b, o); o += 24;
+        b.writeUInt32LE(parseInt(this.card, 10) >>> 0, o); o += 4;
+        b.writeUInt8(1, o); o += 1;
+        group7.copy(b, o); o += 7;
+        o += 1;
+        userId24.copy(b, o);
+        return b;
+    }
+}
+
+
+class FingerPy {
+    constructor(uid, fid, valid, template) {
+        this.uid = parseInt(uid, 10);
+        this.fid = parseInt(fid, 10);
+        this.valid = parseInt(valid, 10);
+        this.template = normalizeTemplateBuffer(template);
+        this.size = this.template.length;
+        this.mark = `${this.template.subarray(0, 8).toString('hex')}...${this.template.subarray(Math.max(this.template.length - 8, 0)).toString('hex')}`;
+    }
+
+    static fromJSON(json) {
+        if (json instanceof FingerPy) return json;
+        if (!json || typeof json !== 'object') {
+            throw new ZKErrorResponse('Invalid finger template');
+        }
+        return new FingerPy(
+            json.uid,
+            json.fid,
+            json.valid !== undefined ? json.valid : 1,
+            json.template
+        );
+    }
+
+    repack() {
+        const b = Buffer.alloc(6 + this.size, 0);
+        b.writeUInt16LE((this.size + 6) & 0xffff, 0);
+        b.writeUInt16LE(this.uid & 0xffff, 2);
+        b.writeInt8(this.fid, 4);
+        b.writeInt8(this.valid, 5);
+        this.template.copy(b, 6);
+        return b;
+    }
+
+    repackOnly() {
+        const b = Buffer.alloc(2 + this.size, 0);
+        b.writeUInt16LE(this.size & 0xffff, 0);
+        this.template.copy(b, 2);
+        return b;
+    }
+
+    toString() {
+        return `<Finger> [uid:${this.uid}, fid:${this.fid}, size:${this.size} v:${this.valid} t:${this.mark}]`;
+    }
+
+    toJSON() {
+        return {
+            size: this.size,
+            uid: this.uid,
+            fid: this.fid,
+            valid: this.valid,
+            template: this.template.toString('hex'),
+        };
+    }
 }
 
 
@@ -130,9 +248,19 @@ function pack_i32_le(n) {
     b.writeInt32LE(n | 0, 0);
     return b;
 }
+function pack_i16_le(n) {
+    const b = Buffer.allocUnsafe(2);
+    b.writeInt16LE(parseInt(n, 10), 0);
+    return b;
+}
 function pack_u32_le(n) {
     const b = Buffer.allocUnsafe(4);
     b.writeUInt32LE(n >>> 0, 0);
+    return b;
+}
+function pack_i8(n) {
+    const b = Buffer.allocUnsafe(1);
+    b.writeInt8(parseInt(n, 10), 0);
     return b;
 }
 
@@ -144,6 +272,22 @@ function unpack_u32_le(buf, off = 0) {
 }
 function unpack_i32_le(buf, off = 0) {
     return buf.readInt32LE(off);
+}
+
+function fixedStringBuffer(value, length, encoding = 'utf8') {
+    const out = Buffer.alloc(length, 0);
+    Buffer.from(String(value == null ? '' : value), encoding).copy(out, 0, 0, length);
+    return out;
+}
+
+function normalizeTemplateBuffer(template) {
+    if (Buffer.isBuffer(template)) return Buffer.from(template);
+    if (ArrayBuffer.isView(template)) {
+        return Buffer.from(template.buffer, template.byteOffset, template.byteLength);
+    }
+    if (Array.isArray(template)) return Buffer.from(template);
+    if (typeof template === 'string') return Buffer.from(template, 'hex');
+    return Buffer.alloc(0);
 }
 
 /**
@@ -854,6 +998,30 @@ class ZKPyTcp {
         return { data: Buffer.concat(data), size: start };
     }
 
+    async _send_with_buffer(buffer) {
+        const MAX_CHUNK = 1024;
+        const payload = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+        const size = payload.length;
+
+        await this.free_data();
+
+        const cmd_response = await this.__send_command(Const.CMD_PREPARE_DATA, pack_u32_le(size));
+        if (!cmd_response.status) throw new ZKErrorResponse("Can't prepare data");
+
+        let start = 0;
+        while (start < size) {
+            const end = Math.min(start + MAX_CHUNK, size);
+            await this.__send_chunk(payload.subarray(start, end));
+            start = end;
+        }
+    }
+
+    async __send_chunk(command_string) {
+        const cmd_response = await this.__send_command(Const.CMD_DATA, command_string);
+        if (cmd_response.status) return true;
+        throw new ZKErrorResponse("Can't send chunk");
+    }
+
     /**
      * read_sizes (pyzk) — subset para users
      * :contentReference[oaicite:21]{index=21}
@@ -1010,6 +1178,168 @@ class ZKPyTcp {
         }
 
         return users;
+    }
+
+    async get_user_template(uid = '', temp_id = 0, user_id = '') {
+        if (!uid) {
+            const users = await this.get_users();
+            const found = users.filter((u) => u.user_id === String(user_id));
+            if (!found.length) return false;
+            uid = found[0].uid;
+        }
+
+        for (let retries = 0; retries < 3; retries++) {
+            const command_string = Buffer.concat([
+                pack_i32_le(parseInt(uid, 10)).subarray(0, 2),
+                pack_i8(parseInt(temp_id, 10)),
+            ]);
+
+            await this.__send_command(Const._CMD_GET_USERTEMP, command_string, 1024 + 8);
+            const data = await this.__recieve_chunk();
+
+            if (data != null) {
+                let resp = data.subarray(0, Math.max(data.length - 1, 0));
+                if (
+                    resp.length >= 6 &&
+                    resp.subarray(resp.length - 6).equals(Buffer.alloc(6, 0))
+                ) {
+                    resp = resp.subarray(0, resp.length - 6);
+                }
+                return new FingerPy(uid, temp_id, 1, resp).toJSON();
+            }
+
+            if (this.verbose) console.log('retry get_user_template');
+        }
+
+        if (this.verbose) console.log("Can't read/find finger");
+        return null;
+    }
+
+    async get_templates() {
+        await this.read_sizes();
+        if (!this.fingers || this.fingers === 0) return [];
+
+        const templates = [];
+        const { data: templatedata0, size } = await this.read_with_buffer(Const.CMD_DB_RRQ, Const.FCT_FINGERTMP);
+        if (!templatedata0 || size < 4 || templatedata0.length < 4) return [];
+
+        let total_size = templatedata0.readInt32LE(0);
+        let templatedata = templatedata0.subarray(4);
+
+        while (total_size > 0) {
+            if (templatedata.length < 6) {
+                throw new ZKErrorResponse('Invalid finger template data');
+            }
+
+            const recordSize = templatedata.readUInt16LE(0);
+            const uid = templatedata.readUInt16LE(2);
+            const fid = templatedata.readInt8(4);
+            const valid = templatedata.readInt8(5);
+
+            if (recordSize < 6 || recordSize > templatedata.length) {
+                throw new ZKErrorResponse('Invalid finger template size');
+            }
+
+            const template = templatedata.subarray(6, recordSize);
+            templates.push(new FingerPy(uid, fid, valid, template).toJSON());
+
+            templatedata = templatedata.subarray(recordSize);
+            total_size -= recordSize;
+        }
+
+        return templates;
+    }
+
+    async save_user_template(userOrUid, fingers = []) {
+        const user = await this.__resolve_user(userOrUid);
+        const fingerList = Array.isArray(fingers) ? fingers : [fingers];
+        const normalizedFingers = fingerList.map((finger) => FingerPy.fromJSON(finger));
+
+        await this.HR_save_usertemplates([[user, normalizedFingers]]);
+        return true;
+    }
+
+    async HR_save_usertemplates(usertemplates) {
+        if (!this.user_packet_size || this.user_packet_size === 28 || ![28, 72].includes(this.user_packet_size)) {
+            await this.__detect_user_packet_size();
+        }
+
+        let upack = Buffer.alloc(0);
+        let fpack = Buffer.alloc(0);
+        let table = Buffer.alloc(0);
+        const fnum = 0x10;
+        let tstart = 0;
+
+        for (const [userInput, fingers] of usertemplates) {
+            const user = UserPy.fromJSON(userInput);
+            upack = Buffer.concat([
+                upack,
+                this.user_packet_size === 28 ? user.repack29() : user.repack73(),
+            ]);
+
+            for (const fingerInput of fingers) {
+                const finger = FingerPy.fromJSON(fingerInput);
+                const tfp = finger.repackOnly();
+                const row = Buffer.concat([
+                    pack_i8(2),
+                    pack_u16_le(user.uid),
+                    pack_i8(fnum + finger.fid),
+                    pack_u32_le(tstart),
+                ]);
+
+                table = Buffer.concat([table, row]);
+                fpack = Buffer.concat([fpack, tfp]);
+                tstart += tfp.length;
+            }
+        }
+
+        const head = Buffer.concat([
+            pack_u32_le(upack.length),
+            pack_u32_le(table.length),
+            pack_u32_le(fpack.length),
+        ]);
+
+        await this._send_with_buffer(Buffer.concat([head, upack, table, fpack]));
+
+        const command_string = Buffer.concat([
+            pack_u32_le(12),
+            pack_u16_le(0),
+            pack_u16_le(8),
+        ]);
+        const cmd_response = await this.__send_command(Const._CMD_SAVE_USERTEMPS, command_string);
+        if (!cmd_response.status) throw new ZKErrorResponse("Can't save usertemplates");
+
+        await this.refresh_data();
+    }
+
+    async __resolve_user(userOrUid) {
+        if (userOrUid instanceof UserPy) return userOrUid;
+        if (userOrUid && typeof userOrUid === 'object') return UserPy.fromJSON(userOrUid);
+
+        const users = await this.get_users();
+        let found = users.filter((u) => u.uid === userOrUid || String(u.uid) === String(userOrUid));
+        if (found.length !== 1) {
+            found = users.filter((u) => u.user_id === String(userOrUid));
+        }
+        if (found.length !== 1) throw new ZKErrorResponse("Can't find user");
+
+        return UserPy.fromJSON(found[0]);
+    }
+
+    async delete_user(uid = 0, user_id = '') {
+        if (!uid) {
+            const users = await this.get_users();
+            const found = users.filter((u) => u.user_id === String(user_id));
+            if (!found.length) return false;
+            uid = found[0].uid;
+        }
+
+        const cmd_response = await this.__send_command(Const.CMD_DELETE_USER, pack_i16_le(uid));
+        if (!cmd_response.status) throw new ZKErrorResponse("Can't delete user");
+
+        await this.refresh_data();
+        if (uid === (this.next_uid - 1)) this.next_uid = uid;
+        return true;
     }
 
     async executeCmdPy(command, command_string = Buffer.alloc(0), response_size = 8) {
@@ -1300,6 +1630,7 @@ module.exports = {
     Const,
     ZKPyTcp,
     UserPy,
+    FingerPy,
     make_commkey,
     ZKError,
     ZKErrorConnection,
